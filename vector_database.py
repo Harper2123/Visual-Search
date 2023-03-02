@@ -1,6 +1,8 @@
 import random
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType
+import numpy as np
 
+from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType
+from sklearn.metrics.pairwise import cosine_similarity
 
 class VectorDatabase:
     """
@@ -32,6 +34,9 @@ class VectorDatabase:
         self.collection_name = collection_name
         self.client = connections.connect(host, port)
         self.collection = self._get_collection()
+        # A dictionary to store vector ids and their corresponding index in the vectors array
+        self.vector_ids = {}
+        self.vectors = {}  # A dictionary to store vectors, grouped by their cosine similarity
 
     def _get_collection(self):
         """
@@ -48,7 +53,7 @@ class VectorDatabase:
             collection_schema = CollectionSchema(
                 self.collection_name,
                 fields=[
-                    FieldSchema(name='feature', dtype=DataType.FLOAT_VECTOR, dim=512)
+                    FieldSchema(name='feature', dtype=DataType.FLOAT_VECTOR, dim=2)
                 ],
                 description="Reduced feature vectors for image data"
             )
@@ -64,8 +69,85 @@ class VectorDatabase:
             A list of feature vectors, each represented as a numpy array.
         """
         entities = [{"feature": vector} for vector in vectors]
-        ids = [random.randint(0, 10000000) for _ in range(len(vectors))]
+        ids = self._generate_unique_ids(len(vectors))
         self.collection.insert(entities, ids)
+        # Add vectors to appropriate groups based on cosine similarity
+        for vector, id_ in zip(vectors, ids):
+            self._add_vector_to_group(vector, id_)
+
+
+    def _generate_unique_ids(self, num_ids):
+        """
+        Generates a list of unique IDs.
+
+        Parameters
+        ----------
+        num_ids : int
+            The number of IDs to generate.
+
+        Returns
+        -------
+        List[int]
+            A list of unique IDs.
+        """
+        existing_ids = set(self.collection.list_id())
+        unique_ids = []
+        while len(unique_ids) < num_ids:
+            new_id = random.randint(0, 10000000)
+            if new_id not in existing_ids:
+                unique_ids.append(new_id)
+                existing_ids.add(new_id)
+        return unique_ids
+
+    
+    def _add_vector_to_group(self, vector, id_):
+        """
+        Adds a vector to the appropriate group based on cosine similarity.
+
+        Parameters
+        ----------
+        vector : np.ndarray
+            The vector represented as a numpy array.
+        id_ : int
+            The ID of the vector.
+        """
+        # Compute cosine similarity with all existing vectors
+        cosine_similarities = []
+        for group in self.vectors.values():
+            for v in group:
+                cosine_similarities.append(cosine_similarity([vector], [v])[0][0])
+        # Find the group with the highest cosine similarity
+        max_similarity = max(cosine_similarities, default=0)
+        for similarity, group in self.vectors.items():
+            if max_similarity == similarity:
+                group.append(vector)
+                break
+            else:
+                self.vectors[max_similarity] = [vector]
+    
+    def get_similar_vectors(self, vector, threshold=0.8):
+        """
+        Retrieves a list of vectors from the collection that are similar to the given vector based on cosine similarity.
+
+        Parameters
+        ----------
+        vector : np.ndarray
+            The vector to search for, represented as a numpy array.
+        threshold : float, optional
+            The minimum cosine similarity required for a vector to be considered similar. Defaults to 0.8.
+
+        Returns
+        -------
+        List[np.ndarray]
+            A list of vectors that are similar to the given vector.
+        """
+        similar_vectors = []
+        for group in self.vectors.values():
+            for v in group:
+                cosine_sim = cosine_similarity([vector], [v])[0][0]
+                if cosine_sim >= threshold:
+                    similar_vectors.append(v)
+        return similar_vectors
 
     def get_vector_by_id(self, id_):
         """
